@@ -1,0 +1,74 @@
+# JSON Combination Prompt
+
+## Objective
+You have received multiple JSON analysis results from different chunks of the same bid document. Your task is to combine these results into a single comprehensive JSON response while maintaining the exact structure and eliminating duplicates.
+
+## Instructions
+
+1. **Analyze each JSON result** provided below
+2. **Identify duplicate opportunities** - same job descriptions or very similar opportunities
+3. **Merge duplicate entries** by keeping the most complete information
+4. **Maintain the exact JSON structure** as specified in the original analysis
+5. **Preserve all unique opportunities** found across all chunks
+6. **Ensure data consistency** across all fields
+
+## Combination Rules
+
+### For Duplicate Jobs:
+- Keep the entry with the highest `match_confidence` score
+- If confidence scores are equal, combine the information to create the most complete entry
+- Merge `job_description` fields to include all relevant details
+- Use the most specific values for fields like `contract_value_range`, `technical_complexity`, etc.
+
+### For Data Conflicts:
+- Choose the most specific/detailed information over generic entries
+- For dates and deadlines, use the most specific format
+- For locations, combine multiple locations if mentioned
+- For requirements, merge all mentioned requirements
+
+### Field Handling:
+- **job_code**: Keep the most appropriate NAICS code based on the combined information
+- **job_description**: Combine descriptions to be comprehensive but avoid redundancy
+- **job_summary**: Create a new comprehensive summary if combining entries
+- **job_size**: Use the larger size if combining similar jobs
+- **match_confidence**: Use the higher confidence score
+- **All other fields**: Use the most specific value, or combine when appropriate
+
+## Required Output Format
+
+Return a single JSON object with the following structure:
+
+```json
+{
+  "subcontractor_jobs": [
+    {
+      "job_code": "string",
+      "job_description": "string",
+      "job_summary": "string", 
+      "job_size": "string",
+      "frequency": "string",
+      "match_confidence": integer,
+      "contract_value_range": "string",
+      "submission_deadline": "string",
+      "licensing_requirements": "string",
+      "technical_complexity": "string",
+      "project_location": "string",
+      "contract_duration": "string",
+      "insurance_requirements": "string",
+      "equipment_specifications": "string",
+      "compliance_standards": "string",
+      "reporting_requirements": "string"
+    }
+  ]
+}
+```
+
+## Important Notes:
+- If all chunk results are empty arrays, return: `{"subcontractor_jobs": []}`
+- Do not add new opportunities that weren't in the original chunks
+- Do not modify NAICS codes unless combining truly identical jobs
+- Maintain professional language and formatting
+- Ensure the final result is valid JSON
+- Remove any analysis chunks that contain errors or invalid JSON
+
+Now please analyze and combine the following JSON results from the document chunks:

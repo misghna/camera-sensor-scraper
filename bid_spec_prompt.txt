@@ -1,0 +1,143 @@
+# Instrumentation & Monitoring Services Bid Document Analysis
+
+## Objective
+Analyze the provided bid document to identify subcontractor opportunities specifically related to instrumentation, monitoring, and measurement services for construction and geotechnical projects. Generate a structured JSON response with detailed information about each identified opportunity.
+
+## Company Service Focus
+Our company specializes in:
+- **Survey work** (total stations, GPS, robotic surveying)
+- **Geotechnical instrumentation** (inclinometers, piezometers, extensometers, MPBX)
+- **Structural monitoring** (tiltmeters, displacement sensors, strain gauges)
+- **Vibration monitoring** (construction vibration, blasting monitoring)
+- **Noise monitoring** (environmental noise, construction noise)
+- **Photographic documentation** (time-lapse, construction progress)
+- **Security camera systems** (construction site monitoring, remote surveillance)
+- **AMTS** (Automated Monitoring and Tracking Systems)
+- **Settlement monitoring** (precise leveling, optical surveys)
+- **Environmental monitoring** (air quality, weather stations)
+
+## Target Opportunity Keywords
+Look specifically for mentions of:
+
+### Survey & Measurement:
+- Survey work, surveying, total station, GPS survey, robotic surveying
+- As-built surveys, construction staking, monitoring surveys
+- Settlement monitoring, deformation monitoring, displacement monitoring
+- Precise leveling, elevation monitoring, vertical displacement
+
+### Geotechnical Instrumentation:
+- Inclinometer, extensometer, piezometer, MPBX (Multi-Point Borehole Extensometer)
+- Settlement plates, settlement monitoring points
+- Slope monitoring, ground movement monitoring
+- Water level monitoring, groundwater monitoring
+- Soil movement, subsidence monitoring
+
+### Structural Monitoring:
+- Structural health monitoring, building monitoring
+- Tiltmeter, displacement sensor, strain gauge
+- Bridge monitoring, tunnel monitoring
+- Real-time monitoring systems, automated monitoring
+
+### Environmental Monitoring:
+- Vibration monitoring, seismic monitoring, blast monitoring
+- Noise monitoring, sound level monitoring, acoustic monitoring
+- Air quality monitoring, dust monitoring
+- Weather monitoring, meteorological stations
+
+### Documentation & Surveillance:
+- Photographic documentation, photo monitoring, time-lapse photography
+- Construction progress documentation, visual documentation
+- Security cameras, surveillance systems, site security monitoring
+- Remote monitoring, wireless monitoring systems
+
+### Automated Systems:
+- AMTS, automated monitoring, real-time data collection
+- Remote data transmission, telemetry
+- Data logging, continuous monitoring
+- Web-based monitoring platforms
+
+## Instructions
+Carefully read through the bid document and identify work, services, or subcontracting opportunities that match our instrumentation and monitoring capabilities. Focus on:
+
+1. **Monitoring requirements** during construction
+2. **Survey work** before, during, or after construction
+3. **Instrumentation installation** and monitoring
+4. **Documentation requirements** (photo, video, time-lapse)
+5. **Environmental compliance monitoring** (vibration, noise)
+6. **Security and surveillance** needs
+7. **Data collection and reporting** requirements
+
+## Target NAICS Codes:
+- **541360** - Geophysical surveys and mapping services
+- **541370** - Surveying and mapping (including monitoring surveys)
+- **541380** - Testing laboratory (including field instrumentation)
+- **541690** - Other Scientific and Technical Consulting Services (monitoring services)
+- **541990** - All other professional, scientific, and technical services
+
+## JSON Response Format
+
+```json
+{
+  "instrumentation_opportunities": [
+    {
+      "job_code": "541370",
+      "service_type": "vibration_monitoring|noise_monitoring|survey_work|geotechnical_instrumentation|photo_documentation|security_cameras|structural_monitoring|settlement_monitoring|environmental_monitoring|automated_systems",
+      "job_description": "Detailed description of the specific monitoring/instrumentation work required",
+      "job_summary": "Concise summary of the instrumentation/monitoring services needed",
+      "equipment_needed": "Specific instruments mentioned (inclinometer, total station, etc.)",
+      "monitoring_duration": "Duration of monitoring period (daily, weekly, throughout construction, etc.)",
+      "monitoring_frequency": "How often readings/reports are required",
+      "match_confidence": "Integer 1-100 indicating relevance to our services",
+      "job_size": "small|medium|big|very big",
+      "contract_value_range": "small (<$100K) | medium ($100K-$1M) | large ($1M-$5M) | mega (>$5M) | Not specified",
+      "submission_deadline": "Proposal due date and time, or 'Not specified'",
+      "licensing_requirements": "Professional licenses, certifications required, or 'Not specified'",
+      "technical_complexity": "low | medium | high | specialized",
+      "project_location": "Specific work locations, or 'Not specified'",
+      "contract_duration": "Project timeline, or 'Not specified'",
+      "reporting_requirements": "Required reports, data formats, frequency",
+      "access_requirements": "Site access, security clearance, or 'Not specified'",
+      "weather_conditions": "Outdoor work considerations, or 'Not specified'",
+      "data_transmission": "Real-time data, remote access requirements, or 'Not specified'"
+    }
+  ]
+}
+```
+
+## Service Type Definitions:
+
+- **vibration_monitoring**: Construction vibration, blasting, seismic monitoring
+- **noise_monitoring**: Environmental noise, construction noise compliance
+- **survey_work**: Land surveying, as-built surveys, construction staking, settlement monitoring
+- **geotechnical_instrumentation**: Inclinometers, piezometers, extensometers, MPBX
+- **photo_documentation**: Time-lapse, progress photos, visual documentation
+- **security_cameras**: Site surveillance, remote monitoring cameras
+- **structural_monitoring**: Building/bridge/tunnel monitoring, tiltmeters, strain gauges
+- **settlement_monitoring**: Precise leveling, vertical displacement monitoring
+- **environmental_monitoring**: Air quality, weather, dust monitoring
+- **automated_systems**: AMTS, real-time data collection, telemetry
+
+## Analysis Guidelines:
+
+1. **Focus on monitoring and measurement services** - Don't include general construction or engineering design
+2. **Look for compliance requirements** - Vibration limits, noise ordinances that require monitoring
+3. **Identify duration and frequency** - Ongoing monitoring vs. one-time surveys
+4. **Note specific equipment mentions** - This indicates they know what they want
+5. **Check for automation requirements** - Real-time data, remote access, web portals
+6. **Consider environmental factors** - Outdoor work, weather protection, site access
+
+## Match Confidence Scoring:
+- **90-100**: Direct mention of our specific equipment/services (inclinometer, vibration monitoring, etc.)
+- **80-89**: Clear monitoring/instrumentation need that fits our capabilities
+- **70-79**: General monitoring requirement we could fulfill
+- **60-69**: Possible opportunity with some interpretation
+- **50-59**: Marginal fit that might be worth considering
+- **Below 50**: Poor match, exclude
+
+## Important Notes:
+- If no relevant opportunities are found, return: `{"instrumentation_opportunities": []}`
+- Focus on subcontracting opportunities, not supply-only contracts
+- Pay attention to insurance and bonding requirements
+- Note any specialized certifications or training requirements
+- Consider both short-term (construction phase) and long-term (post-construction) monitoring
+- Look for opportunities in construction specifications, environmental sections, and geotechnical requirements
