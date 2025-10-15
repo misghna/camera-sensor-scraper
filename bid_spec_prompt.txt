@@ -98,7 +98,10 @@ Carefully read through the bid document and identify work, services, or subcontr
       "reporting_requirements": "Required reports, data formats, frequency",
       "access_requirements": "Site access, security clearance, or 'Not specified'",
       "weather_conditions": "Outdoor work considerations, or 'Not specified'",
-      "data_transmission": "Real-time data, remote access requirements, or 'Not specified'"
+      "data_transmission": "Real-time data, remote access requirements, or 'Not specified'",
+      "project_type": "Short category label summarizing the opportunity (e.g., Survey, Geotechnical, Structural, Environmental, Vibration/Noise, Photo/Security/Docs, Automated Systems, General)",
+      "insurance_requirements": "Insurance/bonding requirements mentioned (e.g., GL, Auto, WC, Professional Liability, Performance/Payment Bonds), or 'Not specified'",
+      "compliance_standards": "Codes/standards/policies to comply with (e.g., PLA, OSHA, ASTM, Cal/OSHA, SWPPP, permit conditions), or 'Not specified'"
     }
   ]
 }
