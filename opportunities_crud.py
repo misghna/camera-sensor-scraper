@@ -13,126 +13,124 @@ except ImportError:
 
 from typing import Optional, Dict, Any, List, Set
 import logging, configparser, os
+from mysql.connector import pooling, Error as MySQLError
 
 SCHEMA = "camera"
 TABLE  = "opportunities"
 
+
 class OpportunitiesCRUD:
-    def __init__(self, db_config: Optional[Dict[str, Any]] = None, credentials_file: str = "credentials.ini"):
-        self.db_config = db_config or self._load_credentials(credentials_file)
-        self.connection = None
+    def __init__(self, use_pool: bool = True, pool_size: int = 5, **db_kwargs):
         self.logger = logging.getLogger(__name__)
+        self.use_pool = use_pool
+        self.pool = None
+        self.connection = None
+        self.db_kwargs = db_kwargs  # host, user, password, database, etc.
 
-    def _load_credentials(self, credentials_file: str) -> Dict[str, Any]:
-        path = os.path.join(os.path.dirname(__file__), credentials_file)
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"credentials.ini not found at: {path}")
-        cfg = configparser.RawConfigParser()
-        cfg.read(path)
-        sect = 'credentials' if cfg.has_section('credentials') else 'DEFAULT'
-        creds = dict(cfg.items(sect))
-        return {
-            'host': creds['db_host'],
-            'database': creds['db_name'],
-            'user': creds['db_user'],
-            'password': creds['db_password'],
-            'port': int(creds.get('db_port', 3306))
-        }
+        if self.use_pool:
+            self.pool = pooling.MySQLConnectionPool(
+                pool_name="opps_pool",
+                pool_size=pool_size,
+                **self.db_kwargs
+            )
 
-    def connect(self):
+    def connect(self) -> bool:
         try:
-            if DB_DRIVER == 'mysql.connector':
-                import mysql.connector
-                self.connection = mysql.connector.connect(**self.db_config)
+            if self.use_pool and self.pool:
+                self.connection = self.pool.get_connection()
             else:
-                import pymysql
-                self.connection = pymysql.connect(**self.db_config)
+                self.connection = mysql.connector.connect(**self.db_kwargs)
             self.logger.info("Connected to MySQL.")
             return True
         except MySQLError as e:
-            self.logger.error(f"DB connection failed: {e}")
+            self.logger.error(f"MySQL connect failed: {e}")
+            self.connection = None
             return False
 
-    def disconnect(self):
-        if self.connection:
-            self.connection.close()
-            self.logger.info("MySQL connection closed.")
+    def ensure_connection(self) -> bool:
+        """Ensure the connection is alive (reconnect if needed)."""
+        try:
+            if not self.connection:
+                return self.connect()
+            # ping will raise if dead; reconnect=True attempts reopen
+            self.connection.ping(reconnect=True, attempts=1, delay=0)
+            return True
+        except Exception:
+            # try fresh connection
+            return self.connect()
 
-    def _cur(self, dictionary=True):
-        if DB_DRIVER == 'mysql.connector':
-            return self.connection.cursor(dictionary=dictionary)
-        else:
-            import pymysql
-            return self.connection.cursor(pymysql.cursors.DictCursor if dictionary else pymysql.cursors.Cursor)
+    def _cur(self, dictionary: bool = False):
+        if not self.ensure_connection():
+            raise RuntimeError("MySQL Connection not available.")
+        return self.connection.cursor(dictionary=dictionary)
 
-    def get_existing_project_ids(self) -> Set[int]:
-        """Fetch all project_ids already in the opportunities table."""
-        if not self.connection and not self.connect(): return set()
-        sql = f"SELECT project_id FROM {SCHEMA}.{TABLE}"
+    def get_existing_project_ids(self) -> set[int]:
+        """Return a set of project_ids already in opportunities."""
+        if not self.ensure_connection():
+            self.logger.error("MySQL Connection not available.")
+            return set()
         cur = self._cur(True)
-        cur.execute(sql)
-        existing = {row['project_id'] for row in cur.fetchall()}
-        cur.close()
-        return existing
+        try:
+            cur.execute(f"SELECT DISTINCT project_id FROM {SCHEMA}.{TABLE}")
+            return {row["project_id"] for row in cur.fetchall()}
+        except MySQLError as e:
+            self.logger.warning(f"get_existing_project_ids failed, reconnecting once: {e}")
+            try: cur.close()
+            except: pass
+            if not self.connect():
+                return set()
+            cur = self._cur(True)
+            cur.execute(f"SELECT DISTINCT project_id FROM {SCHEMA}.{TABLE}")
+            return {row["project_id"] for row in cur.fetchall()}
+        finally:
+            try: cur.close()
+            except: pass
 
     def insert_opportunity(self, row: Dict[str, Any]) -> bool:
-        """Insert a new opportunity row. Assumes project_id not already present."""
-        if not self.connection and not self.connect():
+        if not self.ensure_connection():
+            self.logger.error("MySQL Connection not available.")
             return False
+
         cur = self._cur(False)
-
         sql = f"""
-        INSERT INTO {SCHEMA}.{TABLE}
-        (
-            project_id,
-            job_code,
-            job_description,
-            job_summary,
-            job_size,
-            frequency,
-            match_confidence,
-            contract_value_range,
-            submission_deadline,
-            licensing_requirements,
-            technical_complexity,
-            project_location,
-            contract_duration,
-            insurance_requirements,
-            equipment_specifications,
-            compliance_standards,
-            reporting_requirements,
-            project_type
+        INSERT INTO {SCHEMA}.{TABLE} (
+            project_id, job_code, job_description, job_summary, job_size, frequency,
+            match_confidence, contract_value_range, submission_deadline,
+            licensing_requirements, technical_complexity, project_location,
+            contract_duration, insurance_requirements, equipment_specifications,
+            compliance_standards, reporting_requirements, project_type
         ) VALUES (
-            %(project_id)s,
-            %(job_code)s,
-            %(job_description)s,
-            %(job_summary)s,
-            %(job_size)s,
-            %(frequency)s,
-            %(match_confidence)s,
-            %(contract_value_range)s,
-            %(submission_deadline)s,
-            %(licensing_requirements)s,
-            %(technical_complexity)s,
-            %(project_location)s,
-            %(contract_duration)s,
-            %(insurance_requirements)s,
-            %(equipment_specifications)s,
-            %(compliance_standards)s,
-            %(reporting_requirements)s,
-            %(project_type)s
-        )
-        """
-
+            %(project_id)s, %(job_code)s, %(job_description)s, %(job_summary)s, %(job_size)s, %(frequency)s,
+            %(match_confidence)s, %(contract_value_range)s, %(submission_deadline)s,
+            %(licensing_requirements)s, %(technical_complexity)s, %(project_location)s,
+            %(contract_duration)s, %(insurance_requirements)s, %(equipment_specifications)s,
+            %(compliance_standards)s, %(reporting_requirements)s, %(project_type)s
+        )"""
         try:
             cur.execute(sql, row)
             self.connection.commit()
             self.logger.info(f"Inserted project_id={row.get('project_id')}")
             return True
         except MySQLError as e:
-            self.connection.rollback()
-            self.logger.error(f"Insert failed for project_id={row.get('project_id')}: {e}")
-            return False
+            # retry once after reconnect
+            self.logger.warning(f"Insert error, reconnecting once: {e}")
+            try: cur.close()
+            except: pass
+            if not self.connect():
+                self.logger.error("Reconnect failed.")
+                return False
+            cur = self._cur(False)
+            try:
+                cur.execute(sql, row)
+                self.connection.commit()
+                self.logger.info(f"Inserted project_id={row.get('project_id')} (after reconnect)")
+                return True
+            except MySQLError as e2:
+                self.connection.rollback()
+                self.logger.error(f"Insert failed after reconnect: {e2}")
+                return False
         finally:
-           cur.close()
+            try: cur.close()
+            except: pass
+
 

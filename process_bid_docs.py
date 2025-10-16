@@ -15,7 +15,9 @@ COOLDOWN_MAX_DEFAULT = int(os.getenv("COOLDOWN_MAX", "8"))
 RETRY_WAIT = int(os.getenv("RETRY_WAIT", "60"))              # cooldown before retry pass
 DOC_RETRY_ATTEMPTS = int(os.getenv("DOC_RETRY_ATTEMPTS", "2"))
 BURST_PAUSE_EVERY = int(os.getenv("BURST_PAUSE_EVERY", "15"))
-BURST_PAUSE_SECONDS = int(os.getenv("BURST_PAUSE_SECONDS", "20"))
+BURST_PAUSE_SECONDS = int(os.getenv("BURST_PAUSE_SECONDS", "20")) 
+DEFAULT_S3_BUCKET = os.getenv("DEFAULT_S3_BUCKET", "bid-docs-h2g")
+DEFAULT_S3_PREFIX = os.getenv("DEFAULT_S3_PREFIX", "all/") 
 
 # ------------------------------------------------------------
 # Logging
@@ -153,8 +155,19 @@ for sig in (signal.SIGINT, signal.SIGTERM):
 def process_bid_documents(batch_size: int, start_offset: int, max_docs: Optional[int]):
     crud = OpportunitiesCRUD()
     crud.connect()
-    handler = ProjectDocumentsHandler()
 
+    if not hasattr(crud, "ensure_connection") or not crud.ensure_connection():
+        logger.error("❌ Could not establish DB connection at start.")
+        return
+
+    # best-effort first read of existing IDs
+    try:
+        existing = crud.get_existing_project_ids()
+    except Exception as e:
+        logger.warning(f"get_existing_project_ids failed: {e}. Continuing with empty set.")
+        existing = set()
+
+    handler = ProjectDocumentsHandler()
     processor = S3OpenAIProcessor(require_prompt_file=True, pdf_max_chars=PDF_MAX_CHARS)
 
     offset = start_offset
@@ -177,8 +190,13 @@ def process_bid_documents(batch_size: int, start_offset: int, max_docs: Optional
 
         logger.info(f"📦 Processing batch #{batch_num} ({len(docs)} docs) at offset={offset}…")
 
-        # 2) Filter already processed
-        existing = crud.get_existing_project_ids()
+        # 2) Filter already processed (wrap again for resiliency)
+        try:
+            existing = crud.get_existing_project_ids()
+        except Exception as e:
+            logger.warning(f"get_existing_project_ids failed mid-run: {e}. Using empty set for this batch.")
+            existing = set()
+
         new_docs = [d for d in docs if d.get("project_id") not in existing and d.get("s3_path")]
 
         if not new_docs:
@@ -202,7 +220,7 @@ def process_bid_documents(batch_size: int, start_offset: int, max_docs: Optional
                 time.sleep(BURST_PAUSE_SECONDS)
 
             try:
-                bucket_name, key = _parse_s3_path(s3_path)
+                bucket_name, key = _resolve_s3_path(s3_path)
 
                 # Per-doc retry on OpenAI/S3 hiccups
                 last_err = None
@@ -215,12 +233,13 @@ def process_bid_documents(batch_size: int, start_offset: int, max_docs: Optional
                         last_err = e
                         logger.warning(f"Attempt {attempt}/{DOC_RETRY_ATTEMPTS} failed for project_id={pid}: {e}")
                         if attempt < DOC_RETRY_ATTEMPTS:
-                            # small jittered backoff
-                            backoff = 5 * attempt + random.uniform(0, 1.5)
-                            time.sleep(backoff)
+                            time.sleep(5 * attempt + random.uniform(0, 1.5))
                 else:
-                    # Exhausted attempts
                     raise last_err if last_err else RuntimeError("Unknown processing error")
+
+                # 👉 Ensure DB connection is alive right before inserts
+                if not crud.ensure_connection():
+                    raise RuntimeError("MySQL Connection not available.")
 
                 # Insert ALL opportunities from this response
                 opps_inserted = 0
@@ -239,7 +258,7 @@ def process_bid_documents(batch_size: int, start_offset: int, max_docs: Optional
                 else:
                     logger.info(f"✅ Inserted {opps_inserted} opportunities for project_id={pid}")
 
-                # Cooldown between OpenAI calls (env/CLI tunable)
+                # Cooldown between OpenAI calls
                 sleep_time = random.randint(COOLDOWN_MIN_DEFAULT, COOLDOWN_MAX_DEFAULT)
                 logger.info(f"😴 Cooling down {sleep_time}s to respect API limits…")
                 time.sleep(sleep_time)
@@ -249,7 +268,6 @@ def process_bid_documents(batch_size: int, start_offset: int, max_docs: Optional
                 logger.error(f"❌ Error processing project_id={pid}: {e}")
                 failed_jobs.append(doc)
 
-            # stop early if max_docs was specified
             if max_docs is not None and processed_in_this_run >= max_docs:
                 logger.info(f"⏹️ Reached max_docs={max_docs}; stopping.")
                 break
@@ -263,9 +281,14 @@ def process_bid_documents(batch_size: int, start_offset: int, max_docs: Optional
                     break
                 pid = doc["project_id"]
                 try:
-                    bucket_name, key = _parse_s3_path(doc["s3_path"])
+                    bucket_name, key = _resolve_s3_path(doc["s3_path"])
+
                     ai_response = processor.process_s3_file(bucket_name, key)
                     summary = _parse_ai_summary(ai_response)
+
+                    # ensure DB before retry inserts
+                    if not crud.ensure_connection():
+                        raise RuntimeError("MySQL Connection not available.")
 
                     opps_inserted = 0
                     for opp in _iter_opportunities(summary):
@@ -291,15 +314,43 @@ def process_bid_documents(batch_size: int, start_offset: int, max_docs: Optional
     crud.disconnect()
     logger.info(f"🎉 Done. Inserted opportunities: {processed_total}. Failed docs (initial pass): {failed_total}.")
 
+
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
+
 def _parse_s3_path(s3_path: str):
-    path = s3_path.replace("s3://", "")
+    """
+    Strict parser: expects s3://bucket/key. Keeps existing behavior for true S3 URLs.
+    """
+    path = (s3_path or "").replace("s3://", "", 1)
     parts = path.split("/", 1)
-    if len(parts) < 2:
+    if len(parts) < 2 or not parts[0] or not parts[1]:
         raise ValueError(f"Invalid S3 path: {s3_path}")
     return parts[0], parts[1]
+
+def _resolve_s3_path(s3_path: str):
+    """
+    Flexible resolver:
+      - If s3_path starts with s3:// -> use strict parser.
+      - Else -> treat s3_path as a key under DEFAULT_S3_BUCKET and DEFAULT_S3_PREFIX.
+    """
+    s = (s3_path or "").strip()
+    if not s:
+        raise ValueError("Empty s3_path")
+
+    if s.lower().startswith("s3://"):
+        return _parse_s3_path(s)
+
+    # fallback path (filename or relative key in DB)
+    prefix = DEFAULT_S3_PREFIX or ""
+    # normalize slashes so "all//file.pdf" doesn't happen
+    prefix = prefix.strip("/")
+    key = s.lstrip("/")
+
+    key = f"{prefix}/{key}" if prefix else key
+    return DEFAULT_S3_BUCKET, key
+
 
 def _parse_ai_summary(response):
     """
