@@ -231,12 +231,8 @@ class S3OpenAIProcessor:
         try:
             content = response.choices[0].message.content
             logger.info(f"[AI] Received content length={len(content) if content else 0}")
-            os.makedirs("ai_debug", exist_ok=True)
-            with open(os.path.join("ai_debug", "raw_response.txt"), "w", encoding="utf-8") as f:
-                f.write(content or "")
-            logger.info("[AI] Raw response saved to ai_debug/raw_response.txt")
         except Exception as e:
-            logger.warning(f"[AI] Unable to log raw content: {e}")
+            logger.warning(f"[AI] Unable to read raw content: {e}")
 
         logger.info("Received response from OpenAI")
         return response
