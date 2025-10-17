@@ -181,7 +181,11 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
             existing = set()
 
         # Only process projects not already in opportunities and with an s3_path
-        new_docs = [d for d in docs if d.get("s3_path") and d.get("project_id") not in existing]
+        new_docs = [
+    d for d in docs
+    if _is_valid_s3_path(d.get("s3_path"))
+    and d.get("project_id") not in existing
+]
         if not new_docs:
             logger.info(f"All {len(docs)} docs already processed. Skipping batch #{batch_num}.")
             offset += batch_size
@@ -325,7 +329,18 @@ def _parse_ai_summary(response):
         return json.loads(content) if content else {"instrumentation_opportunities": []}
     except Exception as e:
         logger.warning(f"AI JSON parse failed: {e}")
-        return {"instrumentation_opportunities": []}
+        return {"instrumentation_opportunities": []} 
+def _is_valid_s3_path(s3_path):
+    """Return False for placeholder or obviously invalid S3 keys like 'NA'."""
+    if not s3_path:
+        return False
+    s = str(s3_path).strip().lower()
+    # Common placeholders we’ve seen in data
+    invalid = {"na", "n/a", "none", "null", "-", "--"}
+    if s in invalid:
+        return False
+    # Require that it looks like a real PDF key
+    return s.endswith(".pdf") or s.startswith("s3://")
 
 # ------------------------------------------------------------
 # Entry Point (project-based limit only)
