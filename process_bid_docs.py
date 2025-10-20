@@ -146,7 +146,7 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
 
     crud      = OpportunitiesCRUD()
     handler   = ProjectDocumentsHandler()
-    processor = S3OpenAIProcessor(require_prompt_file=True, pdf_max_chars=PDF_MAX_CHARS)
+    processor = S3OpenAIProcessor(require_prompt_file=True, pdf_max_chars=PDF_MAX_CHARS, aws_profile="java-default")
 
     # Best-effort warm cache of existing IDs
     try:
@@ -353,6 +353,7 @@ if __name__ == "__main__":
                     help=f"Batch size per DB page (default: {BATCH_SIZE_DEFAULT})")
     ap.add_argument("--max-projects", type=int, default=None,
                     help="Stop after processing this many projects (not opportunities)")
+    
 
     args = ap.parse_args()
 
