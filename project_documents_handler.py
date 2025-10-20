@@ -279,6 +279,28 @@ class ProjectDocumentsHandler:
         except Exception as e:
             logging.error(f"Unexpected error inserting bid document: {e}")
             return False
+    def fetch_bid_documents_batch(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Fetch a batch of bid documents with limit + offset for scalable processing."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor(dictionary=True)
+                sql = """
+                SELECT project_id, s3_path 
+                FROM bid_documents 
+                WHERE s3_path IS NOT NULL AND s3_path != '' 
+                ORDER BY id 
+                LIMIT %s OFFSET %s
+                """
+                cursor.execute(sql, (limit, offset))
+                rows = cursor.fetchall()
+                logging.info(f"Fetched {len(rows)} bid document rows (limit={limit}, offset={offset})")
+                return rows
+        except MySQLError as e:
+            logging.error(f"Database error fetching batch: {e}")
+            return []
+        except Exception as e:
+            logging.error(f"Unexpected error fetching batch: {e}")
+            return []    
     
 # Or if you really want missing docs:
 def get_missing_bid_docs(self, all_doc_ids: Set[str]) -> Set[str]:
@@ -316,6 +338,9 @@ def insert_bid_document(project_id: int, document_type: str, document_id: str,
     handler = ProjectDocumentsHandler(credentials_file)
     return handler.insert_bid_document(project_id,document_type, document_id, 
                        display_name, s3_path, retry_count)
+
+
+
 
 
 
