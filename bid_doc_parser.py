@@ -1,9 +1,10 @@
 import os
 import io
+import re
 import json
 import logging
 import configparser
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -61,6 +62,18 @@ def extract_and_print_content(response):
     except Exception as e:
         print(json.dumps({"error": f"Failed to process response: {str(e)}"}, indent=2))
 
+# ---------- Response shim (so outer code keeps working) ----------
+class _Msg:
+    def __init__(self, content: str): self.content = content
+
+class _Choice:
+    def __init__(self, msg: _Msg): self.message = msg
+
+class SimpleAIResponse:
+    """Mimic the shape of OpenAI chat.completions.create response enough for _parse_ai_summary."""
+    def __init__(self, content: str):
+        self.choices = [_Choice(_Msg(content))]
+
 # ---------- Processor ----------
 class S3OpenAIProcessor:
     def __init__(
@@ -87,7 +100,13 @@ class S3OpenAIProcessor:
         self.merge_prompt_filename = merge_prompt_filename
         self.alt_prompt_filenames = alt_prompt_filenames or ["bid_spec_prompt.txt"]
         self.require_prompt_file = require_prompt_file
-        self.pdf_max_chars = pdf_max_chars
+        self.pdf_max_chars = pdf_max_chars  # acts as per-AI-call segment char limit
+
+        # Sentence-aware split tunables (env overridable)
+        self.text_overlap = int(os.getenv("TEXT_SEGMENT_OVERLAP", "400"))
+        self.text_backtrack = int(os.getenv("TEXT_SPLIT_BACKTRACK_WINDOW", "1200"))
+        self.text_min_chars = int(os.getenv("TEXT_MIN_CHARS", "2000"))
+        self.max_segments_per_chunk = int(os.getenv("MAX_SEGMENTS_PER_CHUNK", "50"))
 
         # prompt caches (avoid repeated file I/O)
         self._prompt_cache: Optional[str] = None
@@ -121,7 +140,6 @@ class S3OpenAIProcessor:
 
     # ----- Prompt Loaders (cached; no preview writes) -----
     def _load_prompt_local(self, explicit_path: Optional[str] = None) -> Optional[str]:
-        # use cache if available
         if self._prompt_cache is not None:
             return self._prompt_cache
 
@@ -154,7 +172,6 @@ class S3OpenAIProcessor:
         return None
 
     def _load_merge_prompt_local(self) -> Optional[str]:
-        # use cache if available
         if self._merge_prompt_cache is not None:
             return self._merge_prompt_cache
 
@@ -196,16 +213,11 @@ class S3OpenAIProcessor:
                 parts.append(f"\n--- Page {i+1} ---\n{txt}")
         text = "".join(parts).strip()
 
-        original_length = len(text)
-        logger.info(f"[PDF] Extracted {original_length} characters")
-
-        if self.pdf_max_chars and len(text) > self.pdf_max_chars:
-            text = text[: self.pdf_max_chars] + "\n\n[Truncated due to pdf_max_chars limit]"
-            logger.info(f"[PDF] Truncated from {original_length} to {len(text)} characters due to pdf_max_chars")
-
+        logger.info(f"[PDF] Extracted {len(text)} characters")
+        # IMPORTANT: no truncation here; splitting is handled later per segment
         return text or "[No extractable text found in PDF.]"
 
-    # ----- OpenAI -----
+    # ----- AI -----
     def _chat_complete(self, messages: List[Dict[str, Any]]):
         extra_body = {}
         if self.reasoning_effort:
@@ -227,7 +239,6 @@ class S3OpenAIProcessor:
             **({"extra_body": extra_body} if extra_body else {})
         )
 
-        # Log and save raw content (kept as-is)
         try:
             content = response.choices[0].message.content
             logger.info(f"[AI] Received content length={len(content) if content else 0}")
@@ -237,7 +248,7 @@ class S3OpenAIProcessor:
         logger.info("Received response from OpenAI")
         return response
 
-    # ----- Chunking -----
+    # ----- Size-based PDF chunking -----
     def split_pdf_by_size(self, file_content, max_size_mb=25):
         max_size = max_size_mb * 1024 * 1024
         reader = PdfReader(io.BytesIO(file_content))
@@ -297,11 +308,128 @@ class S3OpenAIProcessor:
             start_page = end_page
             chunk_num += 1
 
-            # keep your heuristic; only logging above changed
         logger.info(f"[CHUNK] Split into {len(chunks)} total chunks")
         for idx, c in enumerate(chunks, start=1):
             logger.info(f"[CHUNK] #{idx} size={len(c)} bytes")
         return chunks
+
+    # ----- NEW: sentence-aware character splitting -----
+    def _split_text_safely(self, text: str, max_chars: int, min_chars: Optional[int] = None, overlap: Optional[int] = None) -> List[str]:
+        """Split text ≤ max_chars, preferring sentence boundaries, adding overlap for continuity."""
+        if not text:
+            return [""]
+
+        max_chars = max(1000, int(max_chars))  # guard
+        min_chars = self.text_min_chars if min_chars is None else max(0, int(min_chars))
+        overlap   = self.text_overlap if overlap is None else max(0, int(overlap))
+
+        segments: List[str] = []
+        i = 0
+        n = len(text)
+
+        # sentence boundary pattern: ., ?, ! followed by whitespace + capital or newline
+        boundary_re = re.compile(r'(?<=\.|\?|!)\s+(?=[A-Z(])')
+
+        while i < n and len(segments) < self.max_segments_per_chunk:
+            hard_end = min(i + max_chars, n)
+            if hard_end >= n:
+                seg = text[i:n]
+                if segments and overlap:
+                    seg = text[i:n]  # last one; no need to trim
+                segments.append(seg)
+                break
+
+            # prefer boundary within backtrack window
+            search_start = max(i + min_chars, hard_end - self.text_backtrack)
+            candidate = text[search_start:hard_end]
+            split_points = [m.start() + search_start for m in boundary_re.finditer(candidate)]
+            if split_points:
+                cut = split_points[-1]  # last boundary before hard_end
+            else:
+                # fallback: nearest whitespace
+                ws = text.rfind(" ", search_start, hard_end)
+                cut = ws if ws != -1 else hard_end  # last resort: hard cut
+
+            seg = text[i:cut]
+            segments.append(seg)
+
+            # next start with overlap
+            i = max(cut - overlap, 0)
+
+        if len(segments) >= self.max_segments_per_chunk and i < n:
+            logger.warning(f"[SPLIT] Reached MAX_SEGMENTS_PER_CHUNK={self.max_segments_per_chunk}; remaining text will be omitted from this chunk.")
+
+        # ensure minimal size where possible (merge tiny tails)
+        merged: List[str] = []
+        for s in segments:
+            if merged and len(s) < min_chars:
+                merged[-1] = (merged[-1] + text_separator() + s).strip()
+            else:
+                merged.append(s)
+        logger.info(f"[SPLIT] Produced {len(merged)} segment(s) with max_chars={max_chars}, overlap={overlap}")
+        return merged
+
+    # ----- NEW: per-segment processing + local merge -----
+    def _process_text_segments_with_ai(self, segments: List[str], prompt: str, chunk_index: int, total_chunks: int) -> List[Dict[str, Any]]:
+        """Send each text segment to the model and parse JSON per segment."""
+        results: List[Dict[str, Any]] = []
+        total = len(segments)
+        for idx, seg in enumerate(segments, start=1):
+            header = (
+                f"SEGMENT {idx}/{total} for CHUNK {chunk_index}/{total_chunks}\n"
+                "Note: Content may continue from previous/next segment.\n"
+            )
+            combined = f"{prompt}\n\n--- BEGIN FILE CONTENT ---\n{header}\n{seg}\n--- END FILE CONTENT ---"
+            messages = [{"role": "user", "content": combined}]
+            resp = self._chat_complete(messages)
+            parsed = self._json_from_ai_response(resp)
+            results.append(parsed)
+            logger.info(f"[SEG] Parsed opportunities in segment {idx}/{total}: {len((parsed or {}).get('instrumentation_opportunities', []))}")
+        return results
+
+    def _json_from_ai_response(self, response) -> Dict[str, Any]:
+        """Best-effort JSON extraction; always return dict with 'instrumentation_opportunities' list."""
+        try:
+            content = response.choices[0].message.content if response and response.choices else ""
+            if not content:
+                return {"instrumentation_opportunities": []}
+            return json.loads(content)
+        except Exception as e:
+            logger.warning(f"[AI JSON] parse failed: {e}")
+            return {"instrumentation_opportunities": []}
+
+    def _merge_opportunity_lists(self, parts: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge multiple JSON dicts: dedupe opportunities by stable key and keep best confidence."""
+        merged: Dict[str, Dict[str, Any]] = {}
+
+        def key_of(o: Dict[str, Any]) -> str:
+            jc = (o.get("job_code") or "").strip().lower()
+            jd = (o.get("job_description") or "").strip().lower()[:120]
+            pl = (o.get("project_location") or "").strip().lower()
+            return f"{jc}|{jd}|{pl}"
+
+        for part in parts or []:
+            for o in (part or {}).get("instrumentation_opportunities", []) or []:
+                k = key_of(o)
+                if k not in merged:
+                    merged[k] = dict(o)
+                else:
+                    # keep highest match_confidence and fill missing fields
+                    existing = merged[k]
+                    try:
+                        ex_conf = int(existing.get("match_confidence") or 0)
+                        new_conf = int(o.get("match_confidence") or 0)
+                        if new_conf > ex_conf:
+                            existing["match_confidence"] = new_conf
+                    except Exception:
+                        pass
+                    for field, val in o.items():
+                        if not existing.get(field) and val not in (None, "", []):
+                            existing[field] = val
+
+        final = {"instrumentation_opportunities": list(merged.values())}
+        logger.info(f"[MERGE] Combined {len(parts)} part(s) → {len(final['instrumentation_opportunities'])} unique opportunity(ies)")
+        return final
 
     # ----- Orchestration -----
     def _process_pdf_file(self, file_content: bytes, prompt: str):
@@ -309,47 +437,37 @@ class S3OpenAIProcessor:
 
         file_splits = self.split_pdf_by_size(file_content)
 
-        # Single-chunk flow
-        if len(file_splits) == 1:
-            logger.info("[PROC] Single chunk flow")
-            text = self._extract_pdf_text(file_splits[0])
-            combined = f"{prompt}\n\n--- BEGIN FILE CONTENT ---\n{text}\n--- END FILE CONTENT ---"
-            messages = [{"role": "user", "content": combined}]
-            return self._chat_complete(messages)
+        # Collect per-chunk JSON dicts (not raw model strings)
+        per_chunk_dicts: List[Dict[str, Any]] = []
+        total_chunks = len(file_splits)
 
-        # Multi-chunk flow
-        logger.info(f"[PROC] Multi-chunk flow: {len(file_splits)} chunks")
-        response_contents = []
-
-        for i, chunk in enumerate(file_splits):
-            logger.info(f"[PROC] Chunk {i+1}/{len(file_splits)}: extracting text")
+        for i, chunk in enumerate(file_splits, start=1):
+            logger.info(f"[PROC] Chunk {i}/{total_chunks}: extracting text")
             text = self._extract_pdf_text(chunk)
-            combined = f"{prompt}\n\n--- BEGIN FILE CONTENT ---\n{text}\n--- END FILE CONTENT ---"
-            messages = [{"role": "user", "content": combined}]
-            chunk_response = self._chat_complete(messages)
-            if hasattr(chunk_response, 'choices') and chunk_response.choices:
-                content = chunk_response.choices[0].message.content or ""
-                logger.info(f"[PROC] Chunk {i+1} AI content length={len(content)}")
-                response_contents.append(content or "No content returned")
+
+            if self.pdf_max_chars and len(text) > self.pdf_max_chars:
+                # Sentence-aware segmentation path
+                segments = self._split_text_safely(text, self.pdf_max_chars)
+                seg_dicts = self._process_text_segments_with_ai(segments, prompt, i, total_chunks)
+                chunk_dict = self._merge_opportunity_lists(seg_dicts)
             else:
-                logger.warning(f"[PROC] No response content for chunk {i+1}")
-                response_contents.append("Error: No response content")
+                # Single call path
+                combined = f"{prompt}\n\n--- BEGIN FILE CONTENT ---\n{text}\n--- END FILE CONTENT ---"
+                messages = [{"role": "user", "content": combined}]
+                chunk_resp = self._chat_complete(messages)
+                chunk_dict = self._json_from_ai_response(chunk_resp)
 
-        # Merge results
-        logger.info("[PROC] Combining chunk responses using merge prompt")
-        merge_prompt = self._load_merge_prompt_local()
+            per_chunk_dicts.append(chunk_dict)
 
-        if merge_prompt:
-            combined_content = "\n\n".join([f"=== Chunk {i+1} Results ===\n{content}" for i, content in enumerate(response_contents)])
-            full_merge_prompt = f"{merge_prompt}\n\n{combined_content}"
-            messages = [{"role": "user", "content": full_merge_prompt}]
-        else:
-            logger.warning("[PROC] Merge prompt not available, using fallback combine prompt")
-            combined_content = "\n\n".join([f"=== Chunk {i+1} ===\n{content}" for i, content in enumerate(response_contents)])
-            combine_prompt = f"Combine and consolidate the following analysis results into a single comprehensive JSON response with the same structure:\n\n{combined_content}"
-            messages = [{"role": "user", "content": combine_prompt}]
+        # If only one chunk, return directly as an OpenAI-shaped response for compatibility
+        if len(per_chunk_dicts) == 1:
+            final_json = per_chunk_dicts[0]
+            return SimpleAIResponse(json.dumps(final_json))
 
-        return self._chat_complete(messages)
+        # Multi-chunk: merge locally to avoid extra model hops
+        logger.info("[PROC] Locally merging chunk results")
+        final_json = self._merge_opportunity_lists(per_chunk_dicts)
+        return SimpleAIResponse(json.dumps(final_json))
 
     # ----- Public entry points -----
     def process_local_file(self, file_path: str, prompt: Optional[str] = None, prompt_path: Optional[str] = None):
@@ -371,3 +489,7 @@ class S3OpenAIProcessor:
         content = self.download_from_s3(bucket_name, key)
         logger.info("Processing with OpenAI")
         return self._process_pdf_file(content, used_prompt or "Analyze this file.")
+
+# ---------- small util ----------
+def text_separator() -> str:
+    return "\n"
