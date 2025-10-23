@@ -1,45 +1,83 @@
-# JSON Combination Prompt
+JSON Combination Prompt
+Objective
+You have received multiple JSON analysis results from different chunks of the same bid document. Your task is to combine these results into a single comprehensive JSON response while maintaining the exact structure and eliminating all duplicates.
+Instructions
 
-## Objective
-You have received multiple JSON analysis results from different chunks of the same bid document. Your task is to combine these results into a single comprehensive JSON response while maintaining the exact structure and eliminating duplicates.
+Analyze each JSON result provided below
+Identify duplicate opportunities using multiple criteria (see Duplicate Detection Rules)
+Merge duplicate entries by keeping the most complete information
+Maintain the exact JSON structure as specified in the original analysis
+Preserve all unique opportunities found across all chunks
+Ensure data consistency across all fields
 
-## Instructions
+Duplicate Detection Rules
+An opportunity is considered a duplicate if it meets ANY of these criteria:
+Primary Duplicate Indicators:
 
-1. **Analyze each JSON result** provided below
-2. **Identify duplicate opportunities** - same job descriptions or very similar opportunities
-3. **Merge duplicate entries** by keeping the most complete information
-4. **Maintain the exact JSON structure** as specified in the original analysis
-5. **Preserve all unique opportunities** found across all chunks
-6. **Ensure data consistency** across all fields
+Identical or highly similar job_code (same NAICS code)
+Job descriptions with >80% semantic similarity (same work scope, just worded differently)
+Same combination of:
 
-## Combination Rules
+Project type
+Location
+General scope of work
+Similar size/value range
 
-### For Duplicate Jobs:
-- Keep the entry with the highest `match_confidence` score
-- If confidence scores are equal, combine the information to create the most complete entry
-- Merge `job_description` fields to include all relevant details
-- Use the most specific values for fields like `contract_value_range`, `technical_complexity`, etc.
 
-### For Data Conflicts:
-- Choose the most specific/detailed information over generic entries
-- For dates and deadlines, use the most specific format
-- For locations, combine multiple locations if mentioned
-- For requirements, merge all mentioned requirements
 
-### Field Handling:
-- **job_code**: Keep the most appropriate NAICS code based on the combined information
-- **job_description**: Combine descriptions to be comprehensive but avoid redundancy
-- **job_summary**: Create a new comprehensive summary if combining entries
-- **job_size**: Use the larger size if combining similar jobs
-- **match_confidence**: Use the higher confidence score
-- **All other fields**: Use the most specific value, or combine when appropriate
+Secondary Duplicate Indicators (use for confirmation):
 
-## Required Output Format
+Similar contract_value_range
+Same submission_deadline
+Same project_location
+Matching contract_duration
+Similar technical_complexity level
 
+Examples of Duplicates to Merge:
+
+"HVAC installation for Building A" and "Install HVAC systems in Building A"
+"Electrical work - 500k-1M" and "Electrical contractor needed - $750k estimated"
+Multiple mentions of the same trade with similar scope across chunks
+
+Combination Rules
+For Duplicate Jobs:
+
+Identify the primary entry: Use the entry with the highest match_confidence score
+Merge information: Combine all relevant details from duplicate entries
+Enhance completeness: Fill in missing fields from duplicate entries
+Deduplicate descriptions: Create a single comprehensive description without repeating information
+Keep the single best entry: After merging, keep only ONE entry for each unique opportunity
+
+For Data Conflicts:
+
+Choose the most specific/detailed information over generic entries
+For dates and deadlines, use the most specific format
+For locations, combine multiple locations if different; keep one if identical
+For requirements, merge all unique requirements (avoid duplicating the same requirement)
+For value ranges, use the most specific or wider range if both are valid
+
+Field Handling:
+
+job_code: Keep the most appropriate NAICS code based on the combined information
+job_description: Combine descriptions to be comprehensive but remove redundant phrases
+job_summary: Create a new comprehensive summary when combining entries
+job_size: Use the larger/more specific size if combining similar jobs
+match_confidence: Use the higher confidence score from duplicates
+All other fields: Use the most specific value, or combine when appropriate (without duplication)
+
+Deduplication Process
+Follow this step-by-step process:
+
+First Pass: Group opportunities by job_code (NAICS code)
+Second Pass: Within each group, compare job_description for semantic similarity
+Third Pass: Check remaining entries for same project location + similar scope
+Fourth Pass: Look for temporal duplicates (same deadline + similar work)
+Merge: Combine all identified duplicates into single enhanced entries
+Final Verification: Review the final list to ensure no duplicates remain
+
+Required Output Format
 Return a single JSON object with the following structure:
-
-```json
-{
+json{
   "subcontractor_jobs": [
     {
       "job_code": "string",
@@ -57,19 +95,27 @@ Return a single JSON object with the following structure:
       "insurance_requirements": "string",
       "equipment_specifications": "string",
       "compliance_standards": "string",
-      "reporting_requirements": "string"
+      "reporting_requirements": "string",
       "project_type": "string"
     }
   ]
 }
-```
+Important Notes:
 
-## Important Notes:
-- If all chunk results are empty arrays, return: `{"subcontractor_jobs": []}`
-- Do not add new opportunities that weren't in the original chunks
-- Do not modify NAICS codes unless combining truly identical jobs
-- Maintain professional language and formatting
-- Ensure the final result is valid JSON
-- Remove any analysis chunks that contain errors or invalid JSON
+Priority: Eliminating duplicates is the PRIMARY goal of this task
+If all chunk results are empty arrays, return: {"subcontractor_jobs": []}
+Do not add new opportunities that weren't in the original chunks
+Do not modify NAICS codes unless combining truly identical jobs
+When in doubt about whether entries are duplicates, err on the side of merging rather than keeping separate
+Maintain professional language and formatting
+Ensure the final result is valid JSON
+Remove any analysis chunks that contain errors or invalid JSON
+Final count verification: The output should have significantly fewer entries than the sum of all input chunks if duplicates exist
 
-Now please analyze and combine the following JSON results from the document chunks:
+Quality Check Before Returning:
+
+ No two entries have the same job_code + similar descriptions
+ No two entries describe the same work at the same location
+ No redundant information within individual descriptions
+ All unique opportunities from chunks are represented
+ Total entries make logical sense for a single bid document
