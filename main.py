@@ -51,11 +51,11 @@ def main():
     
 
     # exit()
-    # searchKeys =["Vibration monitoring","vibration and settlement monitoring","noise monitoring","Geotechnica instrumentation and monitoring",
-    #              "Photographic Documentation","pre-construction Survey","Pre-construction Condition Survey","building Survey","video survey",
-    #              "piezometer","inclinometer","Extensometer","MPBX","building Survey","security camera","camera system","AMTS","Robotic Total Station",
-    #              "displacement monitoring","Settlement Monitoring"]
-    searchKeys =[]
+    searchKeys =["Vibration monitoring","vibration and settlement monitoring","noise monitoring","Geotechnica instrumentation and monitoring",
+                 "Photographic Documentation","pre-construction Survey","Pre-construction Condition Survey","building Survey","video survey",
+                 "piezometer","inclinometer","Extensometer","MPBX","building Survey","security camera","camera system","AMTS","Robotic Total Station",
+                 "displacement monitoring","Settlement Monitoring"]
+    # searchKeys =[]
     for idx,searchVal in enumerate(searchKeys):
         keep_fetching=True
         offsetVal=0
