@@ -226,7 +226,7 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                 break
 
             logger.info(f"\n{'─'*80}")
-            logger.info(f"🔍 PROJECT {project_num}/{len(projects_dict)}: ID={pid}")
+            logger.info(f" *********** Working on PROJECT {project_num}/{len(projects_dict)}: ID={pid} *********")
             logger.info(f"   Documents to process: {len(project_docs)}")
             logger.info(f"{'─'*80}")
 
@@ -309,7 +309,7 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                 logger.info(f"   ℹ️ No opportunities found across all {len(project_docs)} document(s)")
 
             processed_projects += 1
-            logger.info(f"   ✔️ Project {pid} completed. Total projects processed so far: {processed_projects}")
+            logger.info(f" ######  ✔️ Project {pid} completed. Total projects processed so far: {processed_projects} ######")
 
         # Retry failed documents
         if not _stop and failed_projects:
