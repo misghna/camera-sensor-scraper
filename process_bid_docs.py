@@ -142,6 +142,11 @@ for sig in (signal.SIGINT, signal.SIGTERM):
         pass
 
 def process_bid_documents(batch_size: int, start_offset: int, max_projects: Optional[int]):
+    """
+    BEFORE VERSION - Processes ONE document per project
+    Problem: Once a project_id appears in opportunities table, 
+    all other documents for that project are skipped
+    """
     global _stop
 
     crud      = OpportunitiesCRUD()
@@ -180,12 +185,14 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
             logger.warning(f"get_existing_project_ids failed mid-run: {e}. Using empty set for this batch.")
             existing = set()
 
-        # Only process projects not already in opportunities and with an s3_path
+        # ❌ PROBLEM: Only process projects not already in opportunities
+        # This skips ALL other documents for a project once one is processed
         new_docs = [
-    d for d in docs
-    if _is_valid_s3_path(d.get("s3_path"))
-    and d.get("project_id") not in existing
-]
+            d for d in docs
+            if _is_valid_s3_path(d.get("s3_path"))
+            and d.get("project_id") not in existing
+        ]
+        
         if not new_docs:
             logger.info(f"All {len(docs)} docs already processed. Skipping batch #{batch_num}.")
             offset += batch_size
@@ -193,6 +200,9 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
             continue
 
         failed_docs = []
+        
+        # ❌ PROBLEM: Processing docs one-by-one, inserting immediately
+        # This marks project as "done" after first document
         for doc in new_docs:
             if _stop:
                 break
@@ -227,11 +237,12 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                 else:
                     raise last_err if last_err else RuntimeError("Unknown processing error")
 
-                # Insert all opportunities for this project (CRUD opens/closes its own connection)
+                # ❌ PROBLEM: Insert immediately after processing ONE document
+                # This adds project_id to "existing" set, blocking other docs
                 opps_inserted = 0
                 for opp in _iter_opportunities(summary):
                     row = map_ai_opportunity_to_row(pid, opp)
-                    ok  = crud.insert_opportunity(row)  # ✅ no ensure/connect here
+                    ok  = crud.insert_opportunity(row)
                     if ok:
                         inserted_opportunities_total += 1
                         opps_inserted += 1
@@ -277,7 +288,7 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                     opps_inserted = 0
                     for opp in _iter_opportunities(summary):
                         row = map_ai_opportunity_to_row(pid, opp)
-                        ok  = crud.insert_opportunity(row)  # ✅ same one-shot pattern
+                        ok  = crud.insert_opportunity(row)
                         if ok:
                             inserted_opportunities_total += 1
                             opps_inserted += 1
