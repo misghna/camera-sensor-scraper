@@ -78,7 +78,7 @@ Final Verification: Review the final list to ensure no duplicates remain
 Required Output Format
 Return a single JSON object with the following structure:
 json{
-  "subcontractor_jobs": [
+  "instrumentation_opportunities": [
     {
       "job_code": "string",
       "job_description": "string",

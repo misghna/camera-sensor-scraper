@@ -82,7 +82,7 @@ class S3OpenAIProcessor:
         openai_model: str = "gpt-5-mini",
         aws_profile: Optional[str] = "low",
         credentials_ini: str = "credentials.ini",
-        reasoning_effort: Optional[str] = None,
+        reasoning_effort: Optional[str] = "low",
         verbosity: Optional[str] = None,
         max_completion_tokens: int = 8000,
         prompt_filename: str = "bid_spec_prompt.txt",
