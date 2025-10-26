@@ -3,6 +3,8 @@
 ## Objective
 Analyze the provided bid document to identify subcontractor opportunities specifically related to instrumentation, monitoring, and measurement services for construction and geotechnical projects. Generate a structured JSON response with detailed information about each identified opportunity.
 
+**CRITICAL**: Only return opportunities where you can identify SPECIFIC instrumentation types (either explicitly mentioned OR predictable with high confidence). If no specific instrumentation can be identified, return an empty array.
+
 ## Company Service Focus
 Our company specializes in:
 - **Survey work** (total stations, GPS, robotic surveying)
@@ -67,6 +69,46 @@ Carefully read through the bid document and identify work, services, or subcontr
 6. **Security and surveillance** needs
 7. **Data collection and reporting** requirements
 
+## Predictive Analysis - IMPORTANT
+Use your expertise to identify instrumentation needs even when not explicitly stated:
+
+### Explicit Mentions (match_confidence: 90-100):
+- Document says: "Install 5 inclinometers and monitor weekly"
+- You return: `project_type: "Inclinometer monitoring"`
+
+### Predictive/Inferred Needs (match_confidence: 70-89):
+- Document says: "Monitor ground movement adjacent to excavation"
+- You predict: Ground movement = inclinometers, settlement monitoring, survey work
+- You return: `project_type: "Inclinometer monitoring, Settlement monitoring, Survey work"`
+
+- Document says: "Ensure compliance with vibration limits during pile driving"
+- You predict: Compliance = vibration monitoring required
+- You return: `project_type: "Vibration monitoring"`
+
+- Document says: "Monitor tunnel deformation throughout construction"
+- You predict: Tunnel deformation = inclinometers, survey monitoring, displacement sensors
+- You return: `project_type: "Inclinometer monitoring, Survey work, Structural monitoring"`
+
+### Examples of Predictable Instrumentation:
+
+| Bid Document Language | Predicted Instrumentation Types |
+|----------------------|--------------------------------|
+| "Monitor ground movement" | Inclinometer monitoring, Settlement monitoring, Survey work |
+| "Track building settlement" | Settlement monitoring, Survey work, Precise leveling |
+| "Ensure noise compliance" | Noise monitoring |
+| "Monitor excavation stability" | Inclinometer monitoring, Survey work |
+| "Track groundwater levels" | Piezometer monitoring, Water level monitoring |
+| "Document construction progress" | Photographic documentation, Time-lapse photography |
+| "Monitor adjacent structures" | Structural monitoring, Survey work, Tiltmeter monitoring |
+| "Blast monitoring program" | Vibration monitoring, Seismic monitoring |
+| "Monitor slope stability" | Inclinometer monitoring, Survey work, Displacement monitoring |
+
+### When NOT to Return an Opportunity:
+- ❌ "General construction monitoring" (too vague, can't predict specific instrumentation)
+- ❌ "Contractor shall monitor concrete curing" (outside service scope)
+- ❌ "Quality control testing" without specifics (not instrumentation-related)
+- ❌ Low confidence (<70%) about what instrumentation would be needed
+
 ## Target NAICS Codes:
 - **541360** - Geophysical surveys and mapping services
 - **541370** - Surveying and mapping (including monitoring surveys)
@@ -81,13 +123,13 @@ Carefully read through the bid document and identify work, services, or subcontr
   "instrumentation_opportunities": [
     {
       "job_code": "541370",
-      "service_type": "vibration_monitoring|noise_monitoring|survey_work|geotechnical_instrumentation|photo_documentation|security_cameras|structural_monitoring|settlement_monitoring|environmental_monitoring|automated_systems",
+      "project_type": "Comma-separated list of SPECIFIC instrumentation types needed (e.g., 'Inclinometer monitoring, Settlement monitoring, Vibration monitoring')",
       "job_description": "Detailed description of the specific monitoring/instrumentation work required",
       "job_summary": "Concise summary of the instrumentation/monitoring services needed",
-      "equipment_needed": "Specific instruments mentioned (inclinometer, total station, etc.)",
+      "equipment_needed": "Specific instruments mentioned or predicted (inclinometer, total station, vibration monitor, etc.)",
       "monitoring_duration": "Duration of monitoring period (daily, weekly, throughout construction, etc.)",
       "monitoring_frequency": "How often readings/reports are required",
-      "match_confidence": "Integer 1-100 indicating relevance to our services",
+      "match_confidence": "Integer 1-100 (90-100: explicit mention, 70-89: high-confidence prediction, <70: skip)",
       "job_size": "small|medium|big|very big",
       "contract_value_range": "small (<$100K) | medium ($100K-$1M) | large ($1M-$5M) | mega (>$5M) | Not specified",
       "submission_deadline": "Proposal due date and time, or 'Not specified'",
@@ -99,7 +141,6 @@ Carefully read through the bid document and identify work, services, or subcontr
       "access_requirements": "Site access, security clearance, or 'Not specified'",
       "weather_conditions": "Outdoor work considerations, or 'Not specified'",
       "data_transmission": "Real-time data, remote access requirements, or 'Not specified'",
-      "project_type": "Short category label summarizing the opportunity (e.g., Survey, Geotechnical, Structural, Environmental, Vibration/Noise, Photo/Security/Docs, Automated Systems, General)",
       "insurance_requirements": "Insurance/bonding requirements mentioned (e.g., GL, Auto, WC, Professional Liability, Performance/Payment Bonds), or 'Not specified'",
       "compliance_standards": "Codes/standards/policies to comply with (e.g., PLA, OSHA, ASTM, Cal/OSHA, SWPPP, permit conditions), or 'Not specified'"
     }
@@ -107,40 +148,89 @@ Carefully read through the bid document and identify work, services, or subcontr
 }
 ```
 
-## Service Type Definitions:
+## Critical Field: `project_type`
 
-- **vibration_monitoring**: Construction vibration, blasting, seismic monitoring
-- **noise_monitoring**: Environmental noise, construction noise compliance
-- **survey_work**: Land surveying, as-built surveys, construction staking, settlement monitoring
-- **geotechnical_instrumentation**: Inclinometers, piezometers, extensometers, MPBX
-- **photo_documentation**: Time-lapse, progress photos, visual documentation
-- **security_cameras**: Site surveillance, remote monitoring cameras
-- **structural_monitoring**: Building/bridge/tunnel monitoring, tiltmeters, strain gauges
-- **settlement_monitoring**: Precise leveling, vertical displacement monitoring
-- **environmental_monitoring**: Air quality, weather, dust monitoring
-- **automated_systems**: AMTS, real-time data collection, telemetry
+**This is the MOST IMPORTANT field** - it allows the client to quickly filter and identify relevant projects.
+
+### Requirements:
+1. **Be SPECIFIC**: List the actual instrumentation types, not generic categories
+2. **Be DESCRIPTIVE**: Use the client's service terminology
+3. **Be SEARCHABLE**: Use consistent naming (e.g., always "Inclinometer monitoring" not "Inclinometer work")
+4. **Allow MULTIPLE types**: Comma-separated when project needs multiple services
+
+### Good Examples:
+✅ `"Inclinometer monitoring, Settlement monitoring, Survey work"`
+✅ `"Vibration monitoring, Noise monitoring"`
+✅ `"Pre-construction survey, Post-construction survey, Photographic documentation"`
+✅ `"AMTS deployment, Real-time structural monitoring, Tiltmeter installation"`
+✅ `"Piezometer monitoring, Water level monitoring, Groundwater monitoring"`
+
+### Bad Examples (DON'T USE):
+❌ `"Survey"` (too vague)
+❌ `"Geotechnical"` (generic category)
+❌ `"General monitoring"` (not specific)
+❌ `"Construction services"` (not instrumentation-specific)
+
+### Standard Instrumentation Type Names (use these consistently):
+- **Survey work** (general surveying)
+- **Pre-construction survey**
+- **Post-construction survey**
+- **Settlement monitoring**
+- **Inclinometer monitoring**
+- **Piezometer monitoring**
+- **Extensometer monitoring**
+- **MPBX monitoring**
+- **Vibration monitoring**
+- **Noise monitoring**
+- **Seismic monitoring**
+- **Blast monitoring**
+- **Photographic documentation**
+- **Time-lapse photography**
+- **Security camera systems**
+- **Structural monitoring**
+- **Tiltmeter monitoring**
+- **Displacement monitoring**
+- **Strain gauge monitoring**
+- **Ground movement monitoring**
+- **Slope monitoring**
+- **Water level monitoring**
+- **Groundwater monitoring**
+- **Air quality monitoring**
+- **Dust monitoring**
+- **Weather monitoring**
+- **AMTS deployment**
+- **Real-time monitoring systems**
+- **Automated monitoring**
+- **Deformation monitoring**
+- **Building monitoring**
+- **Bridge monitoring**
+- **Tunnel monitoring**
 
 ## Analysis Guidelines:
 
 1. **Focus on monitoring and measurement services** - Don't include general construction or engineering design
-2. **Look for compliance requirements** - Vibration limits, noise ordinances that require monitoring
-3. **Identify duration and frequency** - Ongoing monitoring vs. one-time surveys
-4. **Note specific equipment mentions** - This indicates they know what they want
-5. **Check for automation requirements** - Real-time data, remote access, web portals
-6. **Consider environmental factors** - Outdoor work, weather protection, site access
+2. **Identify SPECIFIC instrumentation types** - This is mandatory for every opportunity
+3. **Use predictive analysis** - Infer likely instrumentation needs from context (e.g., "ground movement" → inclinometers)
+4. **Look for compliance requirements** - Vibration limits, noise ordinances indicate monitoring needs
+5. **Identify duration and frequency** - Ongoing monitoring vs. one-time surveys
+6. **Note specific equipment mentions** - This indicates they know what they want
+7. **Check for automation requirements** - Real-time data, remote access, web portals
+8. **Consider environmental factors** - Outdoor work, weather protection, site access
 
 ## Match Confidence Scoring:
-- **90-100**: Direct mention of our specific equipment/services (inclinometer, vibration monitoring, etc.)
-- **80-89**: Clear monitoring/instrumentation need that fits our capabilities
-- **70-79**: General monitoring requirement we could fulfill
-- **60-69**: Possible opportunity with some interpretation
-- **50-59**: Marginal fit that might be worth considering
-- **Below 50**: Poor match, exclude
+- **90-100**: Direct mention of specific equipment/services (e.g., "install inclinometers", "vibration monitoring required")
+- **80-89**: Clear instrumentation need that's strongly implied (e.g., "monitor ground movement" = inclinometer + survey)
+- **70-79**: Predictable instrumentation from context (e.g., "noise compliance" = noise monitoring)
+- **60-69**: Lower confidence prediction - **SKIP THESE** (don't return as opportunity)
+- **Below 60**: Poor match - **SKIP THESE** (don't return as opportunity)
 
 ## Important Notes:
-- If no relevant opportunities are found, return: `{"instrumentation_opportunities": []}`
+- **If no specific instrumentation types can be identified with confidence ≥70%, return**: `{"instrumentation_opportunities": []}`
 - Focus on subcontracting opportunities, not supply-only contracts
 - Pay attention to insurance and bonding requirements
 - Note any specialized certifications or training requirements
 - Consider both short-term (construction phase) and long-term (post-construction) monitoring
 - Look for opportunities in construction specifications, environmental sections, and geotechnical requirements
+- **Every opportunity MUST have specific instrumentation types in the `project_type` field**
+- Use predictive analysis to identify instrumentation needs even when not explicitly stated
+- Set `match_confidence` appropriately: 90-100 for explicit, 70-89 for predicted
