@@ -143,9 +143,7 @@ for sig in (signal.SIGINT, signal.SIGTERM):
 
 def process_bid_documents(batch_size: int, start_offset: int, max_projects: Optional[int]):
     """
-    BEFORE VERSION - Processes ONE document per project
-    Problem: Once a project_id appears in opportunities table, 
-    all other documents for that project are skipped
+    Simple grouped processing with detailed logging
     """
     global _stop
 
@@ -156,6 +154,7 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
     # Best-effort warm cache of existing IDs
     try:
         existing = crud.get_existing_project_ids()
+        logger.info(f"📊 Found {len(existing)} existing project_ids in opportunities table")
     except Exception as e:
         logger.warning(f"get_existing_project_ids failed: {e}. Continuing with empty set.")
         existing = set()
@@ -176,142 +175,200 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
             logger.info(f"⏹️ Reached max_projects={max_projects}; stopping.")
             break
 
-        logger.info(f"📦 Processing batch #{batch_num} ({len(docs)} docs) at offset={offset}…")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"📦 BATCH #{batch_num} - Fetched {len(docs)} documents at offset={offset}")
+        logger.info(f"{'='*80}")
 
         # Refresh the existing set each batch
         try:
             existing = crud.get_existing_project_ids()
+            logger.info(f"🔄 Refreshed existing project_ids: {len(existing)} projects already processed")
         except Exception as e:
             logger.warning(f"get_existing_project_ids failed mid-run: {e}. Using empty set for this batch.")
             existing = set()
 
-        # ❌ PROBLEM: Only process projects not already in opportunities
-        # This skips ALL other documents for a project once one is processed
+        # Filter valid documents
         new_docs = [
             d for d in docs
             if _is_valid_s3_path(d.get("s3_path"))
             and d.get("project_id") not in existing
         ]
         
+        logger.info(f"📋 After filtering: {len(new_docs)} new documents to process (removed {len(docs) - len(new_docs)} already processed/invalid)")
+        
         if not new_docs:
-            logger.info(f"All {len(docs)} docs already processed. Skipping batch #{batch_num}.")
+            logger.info(f"⏭️ All {len(docs)} docs already processed. Skipping batch #{batch_num}.")
             offset += batch_size
             batch_num += 1
             continue
 
-        failed_docs = []
-        
-        # ❌ PROBLEM: Processing docs one-by-one, inserting immediately
-        # This marks project as "done" after first document
+        # ✅ NEW: Group documents by project_id
+        from collections import defaultdict
+        projects_dict = defaultdict(list)
         for doc in new_docs:
+            projects_dict[doc["project_id"]].append(doc)
+        
+        logger.info(f"\n🗂️ GROUPING SUMMARY:")
+        logger.info(f"   Total documents: {len(new_docs)}")
+        logger.info(f"   Unique projects: {len(projects_dict)}")
+        for pid, docs_list in sorted(projects_dict.items()):
+            logger.info(f"   └─ Project {pid}: {len(docs_list)} document(s)")
+
+        failed_projects = {}
+        
+        # ✅ Process ALL documents for each project
+        for project_num, (pid, project_docs) in enumerate(projects_dict.items(), 1):
             if _stop:
                 break
             if max_projects is not None and processed_projects >= max_projects:
-                logger.info(f"⏹️ Reached max_projects={max_projects}; stopping before project_id={doc['project_id']}.")
+                logger.info(f"⏹️ Reached max_projects={max_projects}; stopping.")
                 _stop = True
                 break
 
-            pid     = doc["project_id"]
-            s3_path = doc["s3_path"]
+            logger.info(f"\n{'─'*80}")
+            logger.info(f"🔍 PROJECT {project_num}/{len(projects_dict)}: ID={pid}")
+            logger.info(f"   Documents to process: {len(project_docs)}")
+            logger.info(f"{'─'*80}")
 
             # Gentle pacing by projects
             if processed_projects > 0 and processed_projects % BURST_PAUSE_EVERY == 0:
                 logger.info(f"⏸️ Burst pause {BURST_PAUSE_SECONDS}s after {processed_projects} projects…")
                 time.sleep(BURST_PAUSE_SECONDS)
 
-            try:
-                bucket_name, key = _resolve_s3_path(s3_path)
+            # Collect all opportunities from ALL documents in this project
+            all_opportunities_for_project = []
+            failed_docs_in_project = []
 
-                # Per-doc retry around S3/AI work
-                last_err = None
-                for attempt in range(1, DOC_RETRY_ATTEMPTS + 1):
-                    try:
-                        ai_response = processor.process_s3_file(bucket_name, key)
-                        summary     = _parse_ai_summary(ai_response)
-                        break
-                    except Exception as e:
-                        last_err = e
-                        logger.warning(f"Attempt {attempt}/{DOC_RETRY_ATTEMPTS} failed for project_id={pid}: {e}")
-                        if attempt < DOC_RETRY_ATTEMPTS:
-                            time.sleep(5 * attempt + random.uniform(0, 1.5))
-                else:
-                    raise last_err if last_err else RuntimeError("Unknown processing error")
+            for doc_idx, doc in enumerate(project_docs, 1):
+                s3_path = doc["s3_path"]
+                logger.info(f"\n   📄 Document {doc_idx}/{len(project_docs)}")
+                logger.info(f"      S3 Path: {s3_path}")
 
-                # ❌ PROBLEM: Insert immediately after processing ONE document
-                # This adds project_id to "existing" set, blocking other docs
+                try:
+                    bucket_name, key = _resolve_s3_path(s3_path)
+                    logger.info(f"      Bucket: {bucket_name}, Key: {key}")
+
+                    # Per-doc retry around S3/AI work
+                    last_err = None
+                    for attempt in range(1, DOC_RETRY_ATTEMPTS + 1):
+                        try:
+                            logger.info(f"      🤖 Attempt {attempt}/{DOC_RETRY_ATTEMPTS}: Sending to OpenAI...")
+                            ai_response = processor.process_s3_file(bucket_name, key)
+                            summary     = _parse_ai_summary(ai_response)
+                            logger.info(f"      ✅ OpenAI processing successful")
+                            break
+                        except Exception as e:
+                            last_err = e
+                            logger.warning(f"      ⚠️ Attempt {attempt}/{DOC_RETRY_ATTEMPTS} failed: {e}")
+                            if attempt < DOC_RETRY_ATTEMPTS:
+                                wait_time = 5 * attempt + random.uniform(0, 1.5)
+                                logger.info(f"      ⏳ Waiting {wait_time:.1f}s before retry...")
+                                time.sleep(wait_time)
+                    else:
+                        raise last_err if last_err else RuntimeError("Unknown processing error")
+
+                    # Collect opportunities (don't insert yet)
+                    doc_opps = list(_iter_opportunities(summary))
+                    all_opportunities_for_project.extend(doc_opps)
+                    logger.info(f"      📊 Extracted {len(doc_opps)} opportunity(ies) from this document")
+
+                    # Cooldown between documents (but not after the last one)
+                    if doc_idx < len(project_docs):
+                        sleep_time = random.randint(COOLDOWN_MIN_DEFAULT, COOLDOWN_MAX_DEFAULT)
+                        logger.info(f"      😴 Cooling down {sleep_time}s before next document...")
+                        time.sleep(sleep_time)
+
+                except Exception as e:
+                    logger.error(f"      ❌ ERROR processing document {doc_idx}: {e}")
+                    failed_docs_in_project.append(doc)
+                    failed_total += 1
+
+            # Track failed docs for retry
+            if failed_docs_in_project:
+                failed_projects[pid] = failed_docs_in_project
+                logger.info(f"\n   ⚠️ {len(failed_docs_in_project)} document(s) failed for this project")
+
+            # ✅ Now insert ALL opportunities for this project
+            logger.info(f"\n   📊 OPPORTUNITIES SUMMARY for Project {pid}:")
+            logger.info(f"      Total opportunities collected: {len(all_opportunities_for_project)}")
+
+            if all_opportunities_for_project:
                 opps_inserted = 0
-                for opp in _iter_opportunities(summary):
+                for opp in all_opportunities_for_project:
                     row = map_ai_opportunity_to_row(pid, opp)
+                    logger.info(f"      💾 Inserting opportunity: {row.get('job_code')} - {row.get('job_description')[:50]}...")
                     ok  = crud.insert_opportunity(row)
                     if ok:
                         inserted_opportunities_total += 1
                         opps_inserted += 1
                     else:
-                        logger.error(f"Insert failed for project_id={pid} (job_code={row.get('job_code')})")
+                        logger.error(f"      ❌ Insert failed for job_code={row.get('job_code')}")
 
-                if opps_inserted == 0:
-                    logger.info(f"ℹ️ No opportunities parsed for project_id={pid}; skipping insert.")
-                else:
-                    logger.info(f"✅ Inserted {opps_inserted} opportunities for project_id={pid}")
+                logger.info(f"   ✅ Successfully inserted {opps_inserted}/{len(all_opportunities_for_project)} opportunities")
+            else:
+                logger.info(f"   ℹ️ No opportunities found across all {len(project_docs)} document(s)")
 
-                processed_projects += 1
+            processed_projects += 1
+            logger.info(f"   ✔️ Project {pid} completed. Total projects processed so far: {processed_projects}")
 
-                # Cooldown between OpenAI calls
-                sleep_time = random.randint(COOLDOWN_MIN_DEFAULT, COOLDOWN_MAX_DEFAULT)
-                logger.info(f"😴 Cooling down {sleep_time}s to respect API limits…")
-                time.sleep(sleep_time)
-
-            except Exception as e:
-                failed_total += 1
-                logger.error(f"❌ Error processing project_id={pid}: {e}")
-                failed_docs.append(doc)
-
-        # Single retry pass for failed docs
-        if not _stop and failed_docs:
-            logger.info(f"⏳ Retrying {len(failed_docs)} failed docs after {RETRY_WAIT}s cooldown…")
+        # Retry failed documents
+        if not _stop and failed_projects:
+            total_failed_docs = sum(len(docs) for docs in failed_projects.values())
+            logger.info(f"\n{'='*80}")
+            logger.info(f"🔄 RETRY PHASE")
+            logger.info(f"   Failed documents: {total_failed_docs} across {len(failed_projects)} projects")
+            logger.info(f"   Waiting {RETRY_WAIT}s before retry...")
+            logger.info(f"{'='*80}")
             time.sleep(RETRY_WAIT)
 
-            for doc in failed_docs:
+            for retry_num, (pid, failed_docs) in enumerate(failed_projects.items(), 1):
                 if _stop:
                     break
                 if max_projects is not None and processed_projects >= max_projects:
-                    logger.info(f"⏹️ Reached max_projects={max_projects}; stopping before retry project_id={doc['project_id']}.")
+                    logger.info(f"⏹️ Reached max_projects={max_projects}; stopping.")
                     _stop = True
                     break
 
-                pid = doc["project_id"]
-                try:
-                    bucket_name, key = _resolve_s3_path(doc["s3_path"])
-                    ai_response = processor.process_s3_file(bucket_name, key)
-                    summary     = _parse_ai_summary(ai_response)
+                logger.info(f"\n🔄 RETRY {retry_num}/{len(failed_projects)}: Project {pid} ({len(failed_docs)} docs)")
+                
+                retry_opportunities = []
+                for doc_idx, doc in enumerate(failed_docs, 1):
+                    logger.info(f"   📄 Retry document {doc_idx}/{len(failed_docs)}: {doc['s3_path']}")
+                    try:
+                        bucket_name, key = _resolve_s3_path(doc["s3_path"])
+                        ai_response = processor.process_s3_file(bucket_name, key)
+                        summary     = _parse_ai_summary(ai_response)
 
+                        doc_opps = list(_iter_opportunities(summary))
+                        retry_opportunities.extend(doc_opps)
+                        logger.info(f"      ✅ Retry successful: {len(doc_opps)} opportunity(ies)")
+
+                    except Exception as e:
+                        logger.error(f"      ❌ Final retry failed: {e}")
+
+                # Insert retry opportunities
+                if retry_opportunities:
                     opps_inserted = 0
-                    for opp in _iter_opportunities(summary):
+                    for opp in retry_opportunities:
                         row = map_ai_opportunity_to_row(pid, opp)
                         ok  = crud.insert_opportunity(row)
                         if ok:
                             inserted_opportunities_total += 1
                             opps_inserted += 1
-                        else:
-                            logger.error(f"Retry insert failed for project_id={pid} (job_code={row.get('job_code')})")
 
-                    if opps_inserted == 0:
-                        logger.info(f"ℹ️ No opportunities parsed on retry for project_id={pid}; skipping.")
-                    else:
-                        logger.info(f"✅ Retry inserted {opps_inserted} opportunities for project_id={pid}")
-
-                    processed_projects += 1
-
-                except Exception as e:
-                    logger.error(f"Final retry failed for project_id={pid}: {e}")
+                    logger.info(f"   ✅ Retry inserted {opps_inserted} opportunities for project {pid}")
+                else:
+                    logger.info(f"   ℹ️ No opportunities from retry for project {pid}")
 
         offset   += batch_size
         batch_num += 1
 
-    logger.info(
-        f"🎉 Done. Inserted opportunities: {inserted_opportunities_total}. "
-        f"Processed projects: {processed_projects}. Failed docs (initial pass): {failed_total}."
-    )
+    logger.info(f"\n{'='*80}")
+    logger.info(f"🎉 PROCESSING COMPLETE")
+    logger.info(f"   Total opportunities inserted: {inserted_opportunities_total}")
+    logger.info(f"   Total projects processed: {processed_projects}")
+    logger.info(f"   Failed documents (initial pass): {failed_total}")
+    logger.info(f"{'='*80}")
 
 # ------------------------------------------------------------
 # Helpers
