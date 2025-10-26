@@ -13,6 +13,7 @@ except ImportError:
     try:
         import pymysql
         from pymysql import Error as MySQLError
+        from pymysql.cursors import DictCursor
         DB_DRIVER = 'pymysql'
     except ImportError:
         raise ImportError("No MySQL driver available. Please install: pip install mysql-connector-python")
@@ -221,7 +222,10 @@ class ProjectDocumentsHandler:
         """Get all existing bid document rows as dictionaries."""
         try:
             with self._get_connection() as conn:
-                cursor = conn.cursor(dictionary=True)  # Returns rows as dicts
+                if DB_DRIVER == 'mysql.connector':
+                    cursor = conn.cursor(dictionary=True)  # Returns rows as dicts
+                else:  # pymysql
+                    cursor = conn.cursor(DictCursor)  # Returns rows as dicts
                 select_sql = "SELECT * FROM bid_doc_view"
                 cursor.execute(select_sql)
                 existing_rows = cursor.fetchall()
@@ -279,11 +283,49 @@ class ProjectDocumentsHandler:
         except Exception as e:
             logging.error(f"Unexpected error inserting bid document: {e}")
             return False
+        
+    def update_relevant_sub_projects(self, project_id: int, count: int) -> bool:
+        """
+        Update the relevant_sub_projects field for a given project_id
+        
+        Args:
+            project_id: Project ID to update
+            count: Number of opportunities inserted (can be 0)
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                update_sql = """
+                UPDATE project_documents 
+                SET relevant_sub_projects = %s 
+                WHERE project_id = %s
+                """
+                
+                cursor.execute(update_sql, (count, str(project_id)))
+                conn.commit()
+                
+                logging.info(f"Updated relevant_sub_projects={count} for project {project_id}")
+                return True
+                
+        except MySQLError as e:
+            logging.error(f"Database error updating relevant_sub_projects: {e}")
+            return False
+        except Exception as e:
+            logging.error(f"Unexpected error updating relevant_sub_projects: {e}")
+            return False
+    
     def fetch_bid_documents_batch(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """Fetch a batch of bid documents with limit + offset for scalable processing."""
         try:
             with self._get_connection() as conn:
-                cursor = conn.cursor(dictionary=True)
+                if DB_DRIVER == 'mysql.connector':
+                    cursor = conn.cursor(dictionary=True)
+                else:  # pymysql
+                    cursor = conn.cursor(DictCursor)
                 sql = """
                 SELECT project_id, s3_path 
                 FROM bid_documents 

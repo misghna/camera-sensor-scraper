@@ -383,8 +383,10 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                         logger.error(f"      ❌ Insert failed for job_code={row.get('job_code')}")
 
                 logger.info(f"   ✅ Successfully inserted {opps_inserted}/{len(merged_opps)} opportunities")
+                handler.update_relevant_sub_projects(pid, opps_inserted)
             else:
                 logger.info(f"   ℹ️ No opportunities found across all {len(project_docs)} document(s)")
+                handler.update_relevant_sub_projects(pid, 0)
 
             processed_projects += 1
             logger.info(f" ###### Project {pid} completed. Total projects processed so far: {processed_projects} #####")
