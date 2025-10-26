@@ -80,7 +80,7 @@ class S3OpenAIProcessor:
         self,
         region: str = "us-east-1",
         openai_model: str = "gpt-5-mini",
-        aws_profile: Optional[str] = None,
+        aws_profile: Optional[str] = "low",
         credentials_ini: str = "credentials.ini",
         reasoning_effort: Optional[str] = None,
         verbosity: Optional[str] = None,

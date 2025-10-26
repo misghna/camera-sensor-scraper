@@ -1,14 +1,13 @@
 import os, time, logging, random, json, signal, argparse
 from typing import Optional, List, Dict, Any
+from collections import defaultdict
 
 from project_documents_handler import ProjectDocumentsHandler
 from opportunities_crud import OpportunitiesCRUD
 from bid_doc_parser import S3OpenAIProcessor
 
-# ------------------------------------------------------------
-# Config (env overrides)
-# ------------------------------------------------------------
-PDF_MAX_CHARS        = int(os.getenv("PDF_MAX_CHARS", "60000"))
+# Config
+PDF_MAX_CHARS        = int(os.getenv("PDF_MAX_CHARS", "500000"))
 BATCH_SIZE_DEFAULT   = int(os.getenv("BATCH_SIZE", "100"))
 COOLDOWN_MIN_DEFAULT = int(os.getenv("COOLDOWN_MIN", "3"))
 COOLDOWN_MAX_DEFAULT = int(os.getenv("COOLDOWN_MAX", "8"))
@@ -19,15 +18,10 @@ BURST_PAUSE_SECONDS  = int(os.getenv("BURST_PAUSE_SECONDS", "20"))
 DEFAULT_S3_BUCKET    = os.getenv("DEFAULT_S3_BUCKET", "bid-docs-h2g")
 DEFAULT_S3_PREFIX    = os.getenv("DEFAULT_S3_PREFIX", "all/")
 
-# ------------------------------------------------------------
-# Logging
-# ------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------
-# Mapping helpers (AI JSON -> DB row)
-# ------------------------------------------------------------
+# Helper functions (keep existing ones)
 def _clamp_int(v, lo=0, hi=255) -> Optional[int]:
     try:
         return max(lo, min(int(v), hi))
@@ -126,9 +120,97 @@ def map_ai_opportunity_to_row(project_id: int, opp: Dict[str, Any]) -> Dict[str,
         "reporting_requirements": opp.get("reporting_requirements"),
     }
 
-# ------------------------------------------------------------
-# Core Production Pipeline
-# ------------------------------------------------------------
+def _parse_s3_path(s3_path: str):
+    path  = (s3_path or "").replace("s3://", "", 1)
+    parts = path.split("/", 1)
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"Invalid S3 path: {s3_path}")
+    return parts[0], parts[1]
+
+def _resolve_s3_path(s3_path: str):
+    s = (s3_path or "").strip()
+    if not s:
+        raise ValueError("Empty s3_path")
+    if s.lower().startswith("s3://"):
+        return _parse_s3_path(s)
+    prefix = (DEFAULT_S3_PREFIX or "").strip("/")
+    key    = s.lstrip("/")
+    key    = f"{prefix}/{key}" if prefix else key
+    return DEFAULT_S3_BUCKET, key
+
+def _parse_ai_summary(response):
+    try:
+        content = response.choices[0].message.content if response and response.choices else ""
+        return json.loads(content) if content else {"instrumentation_opportunities": []}
+    except Exception as e:
+        logger.warning(f"AI JSON parse failed: {e}")
+        return {"instrumentation_opportunities": []}
+
+def _is_valid_s3_path(s3_path):
+    if not s3_path:
+        return False
+    s = str(s3_path).strip().lower()
+    invalid = {"na", "n/a", "none", "null", "-", "--"}
+    if s in invalid:
+        return False
+    return s.endswith(".pdf") or s.startswith("s3://")
+
+# ✅ NEW: AI-based merge function
+def merge_opportunities_with_ai(processor, all_opportunities, project_id):
+    """
+    Use OpenAI with merge prompt to intelligently merge opportunities from multiple documents.
+    """
+    if not all_opportunities:
+        logger.info(f"[MERGE] No opportunities to merge for project {project_id}")
+        return []
+    
+    if len(all_opportunities) == 1:
+        logger.info(f"[MERGE] Only 1 opportunity, no merge needed for project {project_id}")
+        return all_opportunities
+    
+    # Load the merge prompt
+    merge_prompt = processor._load_merge_prompt_local()
+    if not merge_prompt:
+        logger.warning(f"[MERGE] No merge prompt found, returning opportunities as-is")
+        return all_opportunities
+    
+    # Format all opportunities as JSON for the AI
+    opportunities_json = {
+        "instrumentation_opportunities": all_opportunities
+    }
+    opportunities_str = json.dumps(opportunities_json, indent=2)
+    
+    # Construct the message for OpenAI
+    combined_message = f"{merge_prompt}\n\n--- OPPORTUNITIES TO MERGE ---\n{opportunities_str}\n--- END OPPORTUNITIES ---"
+    
+    messages = [{"role": "user", "content": combined_message}]
+    
+    logger.info(f"[MERGE] Sending {len(all_opportunities)} opportunities to OpenAI for intelligent merging...")
+    logger.info(f"[MERGE] Total characters being sent: {len(combined_message)}")
+    
+    try:
+        # Send to OpenAI
+        response = processor._chat_complete(messages)
+        
+        # Parse the response
+        content = response.choices[0].message.content if response and response.choices else ""
+        if not content:
+            logger.warning("[MERGE] Empty response from OpenAI, returning original opportunities")
+            return all_opportunities
+        
+        # Parse JSON response
+        merged_result = json.loads(content)
+        merged_opps = merged_result.get("instrumentation_opportunities", [])
+        
+        logger.info(f"[MERGE] ✅ AI merged {len(all_opportunities)} → {len(merged_opps)} opportunities")
+        return merged_opps
+        
+    except Exception as e:
+        logger.error(f"[MERGE] Error during AI merge: {e}")
+        logger.warning("[MERGE] Falling back to original opportunities")
+        return all_opportunities
+
+# Graceful exit
 _stop = False
 def _graceful_exit(signum, frame):
     global _stop
@@ -142,16 +224,13 @@ for sig in (signal.SIGINT, signal.SIGTERM):
         pass
 
 def process_bid_documents(batch_size: int, start_offset: int, max_projects: Optional[int]):
-    """
-    Simple grouped processing with detailed logging
-    """
+    """Process documents with grouping and AI-based merging"""
     global _stop
 
     crud      = OpportunitiesCRUD()
     handler   = ProjectDocumentsHandler()
     processor = S3OpenAIProcessor(require_prompt_file=True, pdf_max_chars=PDF_MAX_CHARS, aws_profile="java-default")
 
-    # Best-effort warm cache of existing IDs
     try:
         existing = crud.get_existing_project_ids()
         logger.info(f"📊 Found {len(existing)} existing project_ids in opportunities table")
@@ -179,7 +258,6 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
         logger.info(f"📦 BATCH #{batch_num} - Fetched {len(docs)} documents at offset={offset}")
         logger.info(f"{'='*80}")
 
-        # Refresh the existing set each batch
         try:
             existing = crud.get_existing_project_ids()
             logger.info(f"🔄 Refreshed existing project_ids: {len(existing)} projects already processed")
@@ -187,7 +265,6 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
             logger.warning(f"get_existing_project_ids failed mid-run: {e}. Using empty set for this batch.")
             existing = set()
 
-        # Filter valid documents
         new_docs = [
             d for d in docs
             if _is_valid_s3_path(d.get("s3_path"))
@@ -202,8 +279,7 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
             batch_num += 1
             continue
 
-        # ✅ NEW: Group documents by project_id
-        from collections import defaultdict
+        # Group documents by project_id
         projects_dict = defaultdict(list)
         for doc in new_docs:
             projects_dict[doc["project_id"]].append(doc)
@@ -216,7 +292,6 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
 
         failed_projects = {}
         
-        # ✅ Process ALL documents for each project
         for project_num, (pid, project_docs) in enumerate(projects_dict.items(), 1):
             if _stop:
                 break
@@ -226,16 +301,14 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                 break
 
             logger.info(f"\n{'─'*80}")
-            logger.info(f" *********** Working on PROJECT {project_num}/{len(projects_dict)}: ID={pid} *********")
+            logger.info(f"🔍 PROJECT {project_num}/{len(projects_dict)}: ID={pid}")
             logger.info(f"   Documents to process: {len(project_docs)}")
             logger.info(f"{'─'*80}")
 
-            # Gentle pacing by projects
             if processed_projects > 0 and processed_projects % BURST_PAUSE_EVERY == 0:
                 logger.info(f"⏸️ Burst pause {BURST_PAUSE_SECONDS}s after {processed_projects} projects…")
                 time.sleep(BURST_PAUSE_SECONDS)
 
-            # Collect all opportunities from ALL documents in this project
             all_opportunities_for_project = []
             failed_docs_in_project = []
 
@@ -248,7 +321,6 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                     bucket_name, key = _resolve_s3_path(s3_path)
                     logger.info(f"      Bucket: {bucket_name}, Key: {key}")
 
-                    # Per-doc retry around S3/AI work
                     last_err = None
                     for attempt in range(1, DOC_RETRY_ATTEMPTS + 1):
                         try:
@@ -267,12 +339,10 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                     else:
                         raise last_err if last_err else RuntimeError("Unknown processing error")
 
-                    # Collect opportunities (don't insert yet)
                     doc_opps = list(_iter_opportunities(summary))
                     all_opportunities_for_project.extend(doc_opps)
                     logger.info(f"      📊 Extracted {len(doc_opps)} opportunity(ies) from this document")
 
-                    # Cooldown between documents (but not after the last one)
                     if doc_idx < len(project_docs):
                         sleep_time = random.randint(COOLDOWN_MIN_DEFAULT, COOLDOWN_MAX_DEFAULT)
                         logger.info(f"      😴 Cooling down {sleep_time}s before next document...")
@@ -283,18 +353,26 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                     failed_docs_in_project.append(doc)
                     failed_total += 1
 
-            # Track failed docs for retry
             if failed_docs_in_project:
                 failed_projects[pid] = failed_docs_in_project
                 logger.info(f"\n   ⚠️ {len(failed_docs_in_project)} document(s) failed for this project")
 
-            # ✅ Now insert ALL opportunities for this project
+            # ✅ Use AI to merge opportunities
             logger.info(f"\n   📊 OPPORTUNITIES SUMMARY for Project {pid}:")
             logger.info(f"      Total opportunities collected: {len(all_opportunities_for_project)}")
 
             if all_opportunities_for_project:
+                # AI-based intelligent merge
+                merged_opps = merge_opportunities_with_ai(
+                    processor=processor,
+                    all_opportunities=all_opportunities_for_project,
+                    project_id=pid
+                )
+                
+                logger.info(f"      After AI merge: {len(merged_opps)} unique opportunities")
+
                 opps_inserted = 0
-                for opp in all_opportunities_for_project:
+                for opp in merged_opps:
                     row = map_ai_opportunity_to_row(pid, opp)
                     logger.info(f"      💾 Inserting opportunity: {row.get('job_code')} - {row.get('job_description')[:50]}...")
                     ok  = crud.insert_opportunity(row)
@@ -304,29 +382,24 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                     else:
                         logger.error(f"      ❌ Insert failed for job_code={row.get('job_code')}")
 
-                logger.info(f"   ✅ Successfully inserted {opps_inserted}/{len(all_opportunities_for_project)} opportunities")
+                logger.info(f"   ✅ Successfully inserted {opps_inserted}/{len(merged_opps)} opportunities")
             else:
                 logger.info(f"   ℹ️ No opportunities found across all {len(project_docs)} document(s)")
 
             processed_projects += 1
-            logger.info(f" ######  ✔️ Project {pid} completed. Total projects processed so far: {processed_projects} ######")
+            logger.info(f"   ✔️ Project {pid} completed. Total projects processed so far: {processed_projects}")
 
-        # Retry failed documents
+        # Retry logic (similar pattern with AI merge)
         if not _stop and failed_projects:
             total_failed_docs = sum(len(docs) for docs in failed_projects.values())
             logger.info(f"\n{'='*80}")
-            logger.info(f"🔄 RETRY PHASE")
-            logger.info(f"   Failed documents: {total_failed_docs} across {len(failed_projects)} projects")
-            logger.info(f"   Waiting {RETRY_WAIT}s before retry...")
+            logger.info(f"🔄 RETRY PHASE - {total_failed_docs} docs across {len(failed_projects)} projects")
+            logger.info(f"   Waiting {RETRY_WAIT}s...")
             logger.info(f"{'='*80}")
             time.sleep(RETRY_WAIT)
 
             for retry_num, (pid, failed_docs) in enumerate(failed_projects.items(), 1):
-                if _stop:
-                    break
-                if max_projects is not None and processed_projects >= max_projects:
-                    logger.info(f"⏹️ Reached max_projects={max_projects}; stopping.")
-                    _stop = True
+                if _stop or (max_projects is not None and processed_projects >= max_projects):
                     break
 
                 logger.info(f"\n🔄 RETRY {retry_num}/{len(failed_projects)}: Project {pid} ({len(failed_docs)} docs)")
@@ -346,10 +419,16 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                     except Exception as e:
                         logger.error(f"      ❌ Final retry failed: {e}")
 
-                # Insert retry opportunities
                 if retry_opportunities:
+                    # AI merge for retry opportunities too
+                    merged_opps = merge_opportunities_with_ai(
+                        processor=processor,
+                        all_opportunities=retry_opportunities,
+                        project_id=pid
+                    )
+                    
                     opps_inserted = 0
-                    for opp in retry_opportunities:
+                    for opp in merged_opps:
                         row = map_ai_opportunity_to_row(pid, opp)
                         ok  = crud.insert_opportunity(row)
                         if ok:
@@ -357,8 +436,6 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
                             opps_inserted += 1
 
                     logger.info(f"   ✅ Retry inserted {opps_inserted} opportunities for project {pid}")
-                else:
-                    logger.info(f"   ℹ️ No opportunities from retry for project {pid}")
 
         offset   += batch_size
         batch_num += 1
@@ -370,49 +447,6 @@ def process_bid_documents(batch_size: int, start_offset: int, max_projects: Opti
     logger.info(f"   Failed documents (initial pass): {failed_total}")
     logger.info(f"{'='*80}")
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
-def _parse_s3_path(s3_path: str):
-    path  = (s3_path or "").replace("s3://", "", 1)
-    parts = path.split("/", 1)
-    if len(parts) < 2 or not parts[0] or not parts[1]:
-        raise ValueError(f"Invalid S3 path: {s3_path}")
-    return parts[0], parts[1]
-
-def _resolve_s3_path(s3_path: str):
-    s = (s3_path or "").strip()
-    if not s:
-        raise ValueError("Empty s3_path")
-    if s.lower().startswith("s3://"):
-        return _parse_s3_path(s)
-    prefix = (DEFAULT_S3_PREFIX or "").strip("/")
-    key    = s.lstrip("/")
-    key    = f"{prefix}/{key}" if prefix else key
-    return DEFAULT_S3_BUCKET, key
-
-def _parse_ai_summary(response):
-    try:
-        content = response.choices[0].message.content if response and response.choices else ""
-        return json.loads(content) if content else {"instrumentation_opportunities": []}
-    except Exception as e:
-        logger.warning(f"AI JSON parse failed: {e}")
-        return {"instrumentation_opportunities": []} 
-def _is_valid_s3_path(s3_path):
-    """Return False for placeholder or obviously invalid S3 keys like 'NA'."""
-    if not s3_path:
-        return False
-    s = str(s3_path).strip().lower()
-    # Common placeholders we’ve seen in data
-    invalid = {"na", "n/a", "none", "null", "-", "--"}
-    if s in invalid:
-        return False
-    # Require that it looks like a real PDF key
-    return s.endswith(".pdf") or s.startswith("s3://")
-
-# ------------------------------------------------------------
-# Entry Point (project-based limit only)
-# ------------------------------------------------------------
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Process bid documents in batches.")
     ap.add_argument("--offset", type=int, default=int(os.getenv("START_OFFSET", "0")),
@@ -421,7 +455,6 @@ if __name__ == "__main__":
                     help=f"Batch size per DB page (default: {BATCH_SIZE_DEFAULT})")
     ap.add_argument("--max-projects", type=int, default=None,
                     help="Stop after processing this many projects (not opportunities)")
-    
 
     args = ap.parse_args()
 
