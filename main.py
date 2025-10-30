@@ -6,6 +6,7 @@ from file_downloader import FileDownloader
 from project_opportunities_crud import process_projects_batch
 from project_documents_handler import store_project_documents,get_missing_crimson_ids
 from project_documents_handler import get_missing_bid_docs,insert_bid_document
+from update_area_type import OpportunityAreaClassifier
 import time
 import random
 
@@ -124,6 +125,21 @@ def main():
             logger.info(f"No projects found for search key : {searchVal}")
     
     os.remove('session.pkl') if os.path.exists('session.pkl') else None # remove old access 
+
+
+    # ******* Starting area classification process
+    logger.info("Starting area classification process")       
+        # Create classifier instance and pass your logger
+    classifier = OpportunityAreaClassifier(
+            credentials_file="credentials.ini",
+            logger=logger
+        )
+    # Run the classification process
+    classifier.process_all_snapshots()
+    logger.info("Area classification completed")
+
+    #******* Area classification completed
+
 
     logger.info(f"Starting document/File download . . .")
     bid_docs = get_missing_bid_docs()  # This returns a list of rows/dicts
